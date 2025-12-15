@@ -40,6 +40,7 @@ export default function ScreenRecorder() {
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const autoStopTimerRef = useRef<NodeJS.Timeout | null>(null);
   const currentRecordingIdRef = useRef<string | null>(null);
+  const recordingStartTimeRef = useRef<number | null>(null);
 
   // Load all saved recordings on mount
   useEffect(() => {
@@ -141,8 +142,10 @@ export default function ScreenRecorder() {
   const startRecording = useCallback(async () => {
     try {
       setError(null);
+      setRecordingTime(0);
       chunksRef.current = [];
       currentRecordingIdRef.current = generateRecordingId();
+      recordingStartTimeRef.current = Date.now();
       
       // Request screen sharing permission
       const screenStream = await navigator.mediaDevices.getDisplayMedia({
@@ -218,7 +221,9 @@ export default function ScreenRecorder() {
       // Handle recording stop
       mediaRecorder.onstop = async () => {
         const blob = new Blob(chunksRef.current, { type: mimeType });
-        const duration = recordingTime; // Capture current duration
+        const duration = recordingStartTimeRef.current != null
+          ? Math.floor((Date.now() - recordingStartTimeRef.current) / 1000)
+          : recordingTime; // Fallback to state if needed
         
         if (currentRecordingIdRef.current) {
           await saveVideo(currentRecordingIdRef.current, blob, duration);
@@ -233,6 +238,7 @@ export default function ScreenRecorder() {
         
         if (timerRef.current) clearInterval(timerRef.current);
         if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current);
+        recordingStartTimeRef.current = null;
         
         setIsRecording(false);
         setRecordingTime(0);
@@ -251,7 +257,10 @@ export default function ScreenRecorder() {
       
       // Recording timer
       timerRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
+        if (recordingStartTimeRef.current != null) {
+          const elapsedMs = Date.now() - recordingStartTimeRef.current;
+          setRecordingTime(Math.floor(elapsedMs / 1000));
+        }
       }, 1000);
       
       // Auto-stop after max duration
@@ -275,11 +284,20 @@ export default function ScreenRecorder() {
     }
   }, []);
 
-  // Format seconds to MM:SS
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  const formatDuration = (totalSeconds: number) => {
+    if (totalSeconds < 0) return '0:00';
+
+    console.log('totalSeconds', totalSeconds);
+  
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+  
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+  
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
   };
 
   // Format timestamp to readable date
@@ -436,7 +454,6 @@ export default function ScreenRecorder() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
                         {formatDuration(rec.duration)}
-                        console.log(rec.duration);
                       </span>
                       
                       {/* Size */}
