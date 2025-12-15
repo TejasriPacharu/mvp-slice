@@ -1,3 +1,9 @@
+// IndexedDB utility for storing recorded video blobs
+// Using IndexedDB instead of LocalStorage because:
+// 1. LocalStorage has ~5MB size limit (too small for video)
+// 2. LocalStorage only stores strings (would need base64 encoding)
+// 3. IndexedDB can store binary data (Blobs) directly
+
 const DB_NAME = 'ScreenRecorderDB';
 const STORE_NAME = 'recordings';
 const DB_VERSION = 1;
@@ -5,7 +11,9 @@ const DB_VERSION = 1;
 // Recording metadata type
 export interface RecordingMeta {
   id: string;        // Unique timestamp-based ID
+  name: string;      // User-editable name (default: "Recording – HH:MM AM/PM")
   timestamp: number; // Unix timestamp when recorded
+  duration: number;  // Recording duration in seconds
   size: number;      // File size in bytes
 }
 
@@ -32,12 +40,30 @@ export function generateRecordingId(): string {
   return `recording-${Date.now()}`;
 }
 
+// Generate default name based on current time (e.g., "Recording – 2:45 PM")
+export function generateDefaultName(): string {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+  return `Recording – ${timeStr}`;
+}
+
 // Save video blob to IndexedDB with metadata
-export async function saveVideo(id: string, blob: Blob): Promise<RecordingMeta> {
+export async function saveVideo(
+  id: string, 
+  blob: Blob, 
+  duration: number,
+  name?: string
+): Promise<RecordingMeta> {
   const db = await openDB();
   const meta: RecordingMeta = {
     id,
+    name: name || generateDefaultName(),
     timestamp: Date.now(),
+    duration,
     size: blob.size,
   };
   
@@ -54,6 +80,42 @@ export async function saveVideo(id: string, blob: Blob): Promise<RecordingMeta> 
       resolve(meta);
     };
     transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+// Update recording metadata (for renaming)
+export async function updateRecordingMeta(
+  id: string, 
+  updates: Partial<Pick<RecordingMeta, 'name'>>
+): Promise<RecordingMeta | null> {
+  const db = await openDB();
+  
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    const metaKey = `${id}-meta`;
+    
+    // First get the existing metadata
+    const getRequest = store.get(metaKey);
+    
+    getRequest.onsuccess = () => {
+      const existingMeta = getRequest.result as RecordingMeta | undefined;
+      if (!existingMeta) {
+        resolve(null);
+        return;
+      }
+      
+      // Merge updates with existing metadata
+      const updatedMeta: RecordingMeta = { ...existingMeta, ...updates };
+      
+      // Save updated metadata
+      const putRequest = store.put(updatedMeta, metaKey);
+      putRequest.onsuccess = () => resolve(updatedMeta);
+      putRequest.onerror = () => reject(putRequest.error);
+    };
+    
+    getRequest.onerror = () => reject(getRequest.error);
+    transaction.oncomplete = () => db.close();
   });
 }
 

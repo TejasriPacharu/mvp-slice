@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Screen Recorder',
@@ -12,11 +13,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body style={{ 
-        margin: 0, 
-        fontFamily: 'system-ui, -apple-system, sans-serif',
-        backgroundColor: '#fafafa',
-      }}>
+      <body className="bg-gray-50 text-gray-900 antialiased">
         {children}
       </body>
     </html>

@@ -7,6 +7,7 @@ import {
   deleteVideo, 
   getAllRecordings, 
   generateRecordingId,
+  updateRecordingMeta,
   RecordingMeta 
 } from '@/lib/indexeddb';
 
@@ -25,11 +26,16 @@ export default function ScreenRecorder() {
   // Microphone toggle state
   const [includeMic, setIncludeMic] = useState(true);
   
+  // Inline editing state for rename feature
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState('');
+  const editInputRef = useRef<HTMLInputElement>(null);
+  
   // Refs for MediaRecorder and stream management
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const micStreamRef = useRef<MediaStream | null>(null); // Separate ref for mic stream
-  const audioContextRef = useRef<AudioContext | null>(null); // For mixing audio
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const autoStopTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -47,6 +53,14 @@ export default function ScreenRecorder() {
     };
   }, [videoUrl]);
 
+  // Focus input when editing starts
+  useEffect(() => {
+    if (editingId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingId]);
+
   // Fetch all recordings from IndexedDB
   const loadRecordings = async () => {
     try {
@@ -60,7 +74,6 @@ export default function ScreenRecorder() {
   // Play a selected recording
   const playRecording = useCallback(async (id: string) => {
     try {
-      // Revoke previous URL to free memory
       if (videoUrl) URL.revokeObjectURL(videoUrl);
       
       const blob = await getVideo(id);
@@ -77,10 +90,9 @@ export default function ScreenRecorder() {
 
   // Delete a recording
   const handleDelete = useCallback(async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation(); // Prevent triggering play
+    e.stopPropagation();
     try {
       await deleteVideo(id);
-      // Clear player if deleted recording was playing
       if (selectedRecording === id) {
         if (videoUrl) URL.revokeObjectURL(videoUrl);
         setVideoUrl(null);
@@ -92,6 +104,39 @@ export default function ScreenRecorder() {
     }
   }, [selectedRecording, videoUrl]);
 
+  // Start inline editing for rename
+  const startEditing = (rec: RecordingMeta, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingId(rec.id);
+    setEditingName(rec.name);
+  };
+
+  // Save renamed recording
+  const saveRename = async () => {
+    if (!editingId || !editingName.trim()) {
+      setEditingId(null);
+      return;
+    }
+    
+    try {
+      await updateRecordingMeta(editingId, { name: editingName.trim() });
+      await loadRecordings();
+    } catch (err) {
+      console.error('Failed to rename recording:', err);
+    }
+    
+    setEditingId(null);
+  };
+
+  // Handle keyboard events for inline editing
+  const handleEditKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      saveRename();
+    } else if (e.key === 'Escape') {
+      setEditingId(null);
+    }
+  };
+
   // Start screen recording
   const startRecording = useCallback(async () => {
     try {
@@ -99,15 +144,13 @@ export default function ScreenRecorder() {
       chunksRef.current = [];
       currentRecordingIdRef.current = generateRecordingId();
       
-      // Request screen sharing permission from the browser
+      // Request screen sharing permission
       const screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
-        audio: true, // System audio (if user selects "Share audio")
+        audio: true,
       });
       
       streamRef.current = screenStream;
-      
-      // Create the final stream that will be recorded
       let finalStream: MediaStream;
       
       if (includeMic) {
@@ -115,23 +158,21 @@ export default function ScreenRecorder() {
           // Request microphone access
           const micStream = await navigator.mediaDevices.getUserMedia({
             audio: {
-              echoCancellation: true,  // Reduce echo
-              noiseSuppression: true,  // Reduce background noise
-              autoGainControl: true,   // Normalize volume levels
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
             },
             video: false,
           });
           
           micStreamRef.current = micStream;
           
-          // Use Web Audio API to mix screen audio + mic audio
+          // Mix screen audio + mic audio using Web Audio API
           const audioContext = new AudioContext();
           audioContextRef.current = audioContext;
-          
-          // Create a destination for the mixed audio
           const destination = audioContext.createMediaStreamDestination();
           
-          // Add screen audio tracks to the mix (if present)
+          // Add screen audio if present
           const screenAudioTracks = screenStream.getAudioTracks();
           if (screenAudioTracks.length > 0) {
             const screenAudioStream = new MediaStream(screenAudioTracks);
@@ -139,27 +180,25 @@ export default function ScreenRecorder() {
             screenSource.connect(destination);
           }
           
-          // Add microphone audio to the mix
+          // Add microphone audio
           const micSource = audioContext.createMediaStreamSource(micStream);
           micSource.connect(destination);
           
-          // Create final stream: screen video + mixed audio
+          // Final stream: screen video + mixed audio
           finalStream = new MediaStream([
-            ...screenStream.getVideoTracks(),        // Video from screen
-            ...destination.stream.getAudioTracks(), // Mixed audio (screen + mic)
+            ...screenStream.getVideoTracks(),
+            ...destination.stream.getAudioTracks(),
           ]);
           
         } catch (micError) {
-          // If microphone access fails, continue with screen only
           console.warn('Microphone access denied, recording screen only:', micError);
           finalStream = screenStream;
         }
       } else {
-        // No microphone requested, use screen stream as-is
         finalStream = screenStream;
       }
       
-      // Determine supported MIME type for video recording
+      // Determine supported MIME type
       const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
         ? 'video/webm;codecs=vp9'
         : MediaRecorder.isTypeSupported('video/webm')
@@ -179,17 +218,15 @@ export default function ScreenRecorder() {
       // Handle recording stop
       mediaRecorder.onstop = async () => {
         const blob = new Blob(chunksRef.current, { type: mimeType });
+        const duration = recordingTime; // Capture current duration
         
-        // Save with unique ID
         if (currentRecordingIdRef.current) {
-          await saveVideo(currentRecordingIdRef.current, blob);
+          await saveVideo(currentRecordingIdRef.current, blob, duration);
           await loadRecordings();
-          
-          // Auto-play the new recording
           await playRecording(currentRecordingIdRef.current);
         }
         
-        // Cleanup all streams and audio context
+        // Cleanup streams
         streamRef.current?.getTracks().forEach(track => track.stop());
         micStreamRef.current?.getTracks().forEach(track => track.stop());
         audioContextRef.current?.close();
@@ -229,7 +266,7 @@ export default function ScreenRecorder() {
       setError(errorMessage);
       console.error('Recording error:', err);
     }
-  }, [playRecording, includeMic]);
+  }, [playRecording, includeMic, recordingTime]);
 
   // Stop recording manually
   const stopRecording = useCallback(() => {
@@ -239,18 +276,18 @@ export default function ScreenRecorder() {
   }, []);
 
   // Format seconds to MM:SS
-  const formatTime = (seconds: number) => {
+  const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   // Format timestamp to readable date
   const formatDate = (timestamp: number) => {
-    return new Date(timestamp).toLocaleString(undefined, {
+    return new Date(timestamp).toLocaleDateString(undefined, {
       month: 'short',
       day: 'numeric',
-      hour: '2-digit',
+      hour: 'numeric',
       minute: '2-digit',
     });
   };
@@ -262,177 +299,78 @@ export default function ScreenRecorder() {
   };
 
   return (
-    <div style={{ 
-      padding: '2rem', 
-      maxWidth: '900px', 
-      margin: '0 auto',
-      minHeight: '100vh',
-    }}>
-      {/* Header */}
-      <h1 style={{ 
-        marginBottom: '1.5rem',
-        fontSize: '1.5rem',
-        fontWeight: '600',
-        color: '#111',
-      }}>
-        Screen Recorder
-      </h1>
-      
-      {/* Error display */}
-      {error && (
-        <p style={{ 
-          color: '#dc2626', 
-          marginBottom: '1rem',
-          padding: '0.75rem',
-          backgroundColor: '#fef2f2',
-          borderRadius: '6px',
-          fontSize: '0.875rem',
-        }}>
-          {error}
-        </p>
-      )}
-      
-      {/* Recording controls */}
-      <div style={{ marginBottom: '2rem' }}>
-        {!isRecording ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-            <button
-              onClick={startRecording}
-              style={{
-                padding: '12px 28px',
-                fontSize: '15px',
-                fontWeight: '500',
-                cursor: 'pointer',
-                backgroundColor: '#111',
-                color: 'white',
-                border: 'none',
-                borderRadius: '8px',
-                transition: 'background-color 0.2s',
-              }}
-              onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#333'}
-              onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#111'}
-            >
-              ● Record Screen
-            </button>
-            
-            {/* Microphone toggle */}
-            <label style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              cursor: 'pointer',
-              fontSize: '14px',
-              color: '#444',
-              userSelect: 'none',
-            }}>
-              <div 
-                onClick={() => setIncludeMic(!includeMic)}
-                style={{
-                  width: '40px',
-                  height: '22px',
-                  backgroundColor: includeMic ? '#111' : '#ddd',
-                  borderRadius: '11px',
-                  position: 'relative',
-                  transition: 'background-color 0.2s',
-                  cursor: 'pointer',
-                }}
-              >
-                <div style={{
-                  width: '18px',
-                  height: '18px',
-                  backgroundColor: 'white',
-                  borderRadius: '50%',
-                  position: 'absolute',
-                  top: '2px',
-                  left: includeMic ? '20px' : '2px',
-                  transition: 'left 0.2s',
-                  boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-                }} />
-              </div>
-              <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                🎤 Microphone {includeMic ? 'On' : 'Off'}
-              </span>
-            </label>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '8px 16px',
-              backgroundColor: '#fef2f2',
-              borderRadius: '8px',
-            }}>
-              <span style={{ 
-                width: '10px',
-                height: '10px',
-                backgroundColor: '#dc2626',
-                borderRadius: '50%',
-                animation: 'pulse 1s infinite',
-              }} />
-              <span style={{ 
-                fontFamily: 'monospace',
-                fontSize: '14px',
-                color: '#111',
-              }}>
-                {formatTime(recordingTime)}
-              </span>
-            </div>
-            <button
-              onClick={stopRecording}
-              style={{
-                padding: '12px 28px',
-                fontSize: '15px',
-                fontWeight: '500',
-                cursor: 'pointer',
-                backgroundColor: '#dc2626',
-                color: 'white',
-                border: 'none',
-                borderRadius: '8px',
-                transition: 'background-color 0.2s',
-              }}
-              onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#b91c1c'}
-              onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#dc2626'}
-            >
-              ■ Stop
-            </button>
+    <div className="min-h-screen bg-gray-50 p-6 md:p-8">
+      <div className="max-w-4xl mx-auto space-y-6">
+        
+        {/* Header */}
+        <h1 className="text-2xl font-semibold text-gray-900">
+          Screen Recorder
+        </h1>
+        
+        {/* Error display */}
+        {error && (
+          <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+            {error}
           </div>
         )}
-      </div>
+        
+        {/* Recording controls */}
+        <div className="flex flex-wrap items-center gap-4">
+          {!isRecording ? (
+            <>
+              <button
+                onClick={startRecording}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-gray-900 text-white text-sm font-medium rounded-lg hover:bg-gray-800 transition-colors focus:outline-none focus:ring-2 focus:ring-gray-900 focus:ring-offset-2"
+              >
+                <span className="w-2 h-2 bg-red-500 rounded-full" />
+                Record Screen
+              </button>
+              
+              {/* Microphone toggle */}
+              <button
+                onClick={() => setIncludeMic(!includeMic)}
+                className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg border transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+                  includeMic 
+                    ? 'bg-gray-900 text-white border-gray-900 hover:bg-gray-800 focus:ring-gray-900' 
+                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 focus:ring-gray-400'
+                }`}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+                Mic {includeMic ? 'On' : 'Off'}
+              </button>
+            </>
+          ) : (
+            <div className="flex items-center gap-4">
+              <div className="inline-flex items-center gap-2 px-4 py-2.5 bg-red-50 rounded-lg">
+                <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse" />
+                <span className="font-mono text-sm text-gray-900">
+                  {formatDuration(recordingTime)}
+                </span>
+              </div>
+              <button
+                onClick={stopRecording}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors focus:outline-none focus:ring-2 focus:ring-red-600 focus:ring-offset-2"
+              >
+                <span className="w-2.5 h-2.5 bg-white rounded-sm" />
+                Stop
+              </button>
+            </div>
+          )}
+        </div>
 
-      {/* Main content area */}
-      <div style={{ 
-        display: 'grid', 
-        gridTemplateColumns: recordings.length > 0 ? '1fr 280px' : '1fr',
-        gap: '24px',
-      }}>
-        {/* Video player */}
-        <div>
+        {/* Video Player */}
+        <div className="rounded-xl overflow-hidden bg-black aspect-video">
           {videoUrl ? (
             <video
               src={videoUrl}
               controls
               autoPlay
-              style={{ 
-                width: '100%', 
-                aspectRatio: '16/9',
-                backgroundColor: '#000',
-                borderRadius: '8px',
-              }}
+              className="w-full h-full"
             />
           ) : (
-            <div style={{
-              width: '100%',
-              aspectRatio: '16/9',
-              backgroundColor: '#f5f5f5',
-              borderRadius: '8px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#999',
-              fontSize: '14px',
-            }}>
+            <div className="w-full h-full flex items-center justify-center text-gray-500 text-sm">
               {recordings.length > 0 
                 ? 'Select a recording to play' 
                 : 'No recordings yet. Click "Record Screen" to start.'}
@@ -440,107 +378,111 @@ export default function ScreenRecorder() {
           )}
         </div>
 
-        {/* Recordings list */}
+        {/* Recordings List - Vertical Layout */}
         {recordings.length > 0 && (
-          <div style={{
-            backgroundColor: '#fff',
-            borderRadius: '8px',
-            border: '1px solid #e5e5e5',
-            overflow: 'hidden',
-          }}>
-            <div style={{
-              padding: '12px 16px',
-              borderBottom: '1px solid #e5e5e5',
-              fontSize: '13px',
-              fontWeight: '600',
-              color: '#666',
-              textTransform: 'uppercase',
-              letterSpacing: '0.5px',
-            }}>
+          <div className="space-y-3">
+            <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wide">
               Recordings ({recordings.length})
-            </div>
-            <div style={{ 
-              maxHeight: '400px', 
-              overflowY: 'auto',
-            }}>
+            </h2>
+            
+            <div className="space-y-2">
               {recordings.map((rec) => (
                 <div
                   key={rec.id}
                   onClick={() => playRecording(rec.id)}
-                  style={{
-                    padding: '12px 16px',
-                    cursor: 'pointer',
-                    borderBottom: '1px solid #f0f0f0',
-                    backgroundColor: selectedRecording === rec.id ? '#f5f5f5' : 'transparent',
-                    transition: 'background-color 0.15s',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                  }}
-                  onMouseOver={(e) => {
-                    if (selectedRecording !== rec.id) {
-                      e.currentTarget.style.backgroundColor = '#fafafa';
-                    }
-                  }}
-                  onMouseOut={(e) => {
-                    if (selectedRecording !== rec.id) {
-                      e.currentTarget.style.backgroundColor = 'transparent';
-                    }
-                  }}
+                  className={`group flex items-center justify-between p-4 rounded-xl border cursor-pointer transition-all ${
+                    selectedRecording === rec.id
+                      ? 'bg-gray-100 border-gray-300'
+                      : 'bg-white border-gray-200 hover:border-gray-300 hover:shadow-sm'
+                  }`}
                 >
-                  <div>
-                    <div style={{ 
-                      fontSize: '14px', 
-                      color: '#111',
-                      marginBottom: '2px',
-                    }}>
-                      {formatDate(rec.timestamp)}
-                    </div>
-                    <div style={{ 
-                      fontSize: '12px', 
-                      color: '#888',
-                    }}>
-                      {formatSize(rec.size)}
+                  {/* Left side: Name and metadata */}
+                  <div className="flex-1 min-w-0 space-y-1">
+                    {/* Recording name - inline editable */}
+                    {editingId === rec.id ? (
+                      <input
+                        ref={editInputRef}
+                        type="text"
+                        value={editingName}
+                        onChange={(e) => setEditingName(e.target.value)}
+                        onBlur={saveRename}
+                        onKeyDown={handleEditKeyDown}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-full px-2 py-1 text-sm font-medium text-gray-900 bg-white border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                      />
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-gray-900 truncate">
+                          {rec.name}
+                        </span>
+                        {/* Edit/Rename button */}
+                        <button
+                          onClick={(e) => startEditing(rec, e)}
+                          className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-gray-600 transition-opacity focus:opacity-100 focus:outline-none"
+                          title="Rename"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                          </svg>
+                        </button>
+                      </div>
+                    )}
+                    
+                    {/* Metadata row: duration, size, date */}
+                    <div className="flex items-center gap-3 text-xs text-gray-500">
+                      {/* Duration */}
+                      <span className="inline-flex items-center gap-1">
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        {formatDuration(rec.duration)}
+                        console.log(rec.duration);
+                      </span>
+                      
+                      {/* Size */}
+                      <span className="inline-flex items-center gap-1">
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+                        </svg>
+                        {formatSize(rec.size)}
+                      </span>
+                      
+                      {/* Date */}
+                      <span className="inline-flex items-center gap-1">
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                        </svg>
+                        {formatDate(rec.timestamp)}
+                      </span>
                     </div>
                   </div>
-                  <button
-                    onClick={(e) => handleDelete(rec.id, e)}
-                    style={{
-                      padding: '4px 8px',
-                      fontSize: '12px',
-                      color: '#999',
-                      backgroundColor: 'transparent',
-                      border: 'none',
-                      cursor: 'pointer',
-                      borderRadius: '4px',
-                      transition: 'all 0.15s',
-                    }}
-                    onMouseOver={(e) => {
-                      e.currentTarget.style.color = '#dc2626';
-                      e.currentTarget.style.backgroundColor = '#fef2f2';
-                    }}
-                    onMouseOut={(e) => {
-                      e.currentTarget.style.color = '#999';
-                      e.currentTarget.style.backgroundColor = 'transparent';
-                    }}
-                    title="Delete recording"
-                  >
-                    ✕
-                  </button>
+                  
+                  {/* Right side: Actions */}
+                  <div className="flex items-center gap-2 ml-4">
+                    {/* Playing indicator */}
+                    {selectedRecording === rec.id && (
+                      <span className="text-xs font-medium text-gray-500 uppercase">
+                        Playing
+                      </span>
+                    )}
+                    
+                    {/* Delete button */}
+                    <button
+                      onClick={(e) => handleDelete(rec.id, e)}
+                      className="opacity-0 group-hover:opacity-100 p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all focus:opacity-100 focus:outline-none"
+                      title="Delete recording"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
           </div>
         )}
       </div>
-      
-      {/* CSS for pulse animation */}
-      <style jsx>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.4; }
-        }
-      `}</style>
     </div>
   );
 }
